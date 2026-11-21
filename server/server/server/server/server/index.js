@@ -1,9 +1,16 @@
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
 import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import Anthropic from '@anthropic-ai/sdk'
 
 dotenv.config()
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+const distPath = path.resolve(__dirname, '..', 'dist')
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -29,7 +36,7 @@ app.post('/api/recommendations', async (req, res) => {
     const apiKey = process.env.ANTHROPIC_API_KEY
     if (!apiKey) {
       return res.status(503).json({
-        error: 'ANTHROPIC_API_KEY is not configured in server/.env.',
+        error: 'ANTHROPIC_API_KEY is not configured on the server.',
       })
     }
 
@@ -128,6 +135,18 @@ ${zones
   }
 })
 
-app.listen(PORT, () => {
-  console.log(`Nanded Shop Analyzer API running at http://localhost:${PORT}`)
+// Serve built React frontend in production (Docker / Render)
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath))
+
+  app.use((req, res) => {
+    if (req.path.startsWith('/api/')) {
+      return res.status(404).json({ error: 'API route not found' })
+    }
+    return res.sendFile(path.join(distPath, 'index.html'))
+  })
+}
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Nanded Shop Analyzer server listening on http://0.0.0.0:${PORT}`)
 })
