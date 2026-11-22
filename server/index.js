@@ -1,4 +1,5 @@
-﻿import fs from 'fs'
+﻿/* global process */
+import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import express from 'express'
@@ -172,3 +173,4 @@ if (fs.existsSync(distPath)) {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Nanded Shop Analyzer server listening on http://0.0.0.0:${PORT}`)
 })
+
