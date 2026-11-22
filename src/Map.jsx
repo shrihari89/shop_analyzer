@@ -10,6 +10,7 @@ import {
 import { MapBootLoader } from './components/LoadingOverlay'
 
 let mapsOptionsConfigured = false
+const CLIENT_CACHE_TTL_MS = 60 * 60 * 1000 // 1 hour
 
 const ZONE_COLORS = {
   Low: { fill: '#16A34A', stroke: '#15803D', fillOpacity: 0.22 },
@@ -27,33 +28,39 @@ function getPlaceName(place) {
   return 'Unnamed Business'
 }
 
+function readClientCache(category) {
+  try {
+    const raw = sessionStorage.getItem(`nanded_places_${category}`)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (Date.now() - parsed.cachedAt < CLIENT_CACHE_TTL_MS && Array.isArray(parsed.places)) {
+      return parsed.places
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  return null
+}
+
+function writeClientCache(category, places) {
+  try {
+    sessionStorage.setItem(
+      `nanded_places_${category}`,
+      JSON.stringify({ cachedAt: Date.now(), places }),
+    )
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 async function querySectorPlaces(Place, queryTerm, sector) {
   const textQuery = `${queryTerm} near ${sector.name}, Nanded City, Sinhagad Road, Pune`
-
-  try {
-    return await Place.searchByText({
-      textQuery,
-      fields: [
-        'id',
-        'displayName',
-        'location',
-        'formattedAddress',
-        'rating',
-        'userRatingCount',
-        'businessStatus',
-      ],
-      locationBias: sector.center,
-      maxResultCount: 20,
-    })
-  } catch (err) {
-    console.warn(`Extended Places query failed for ${sector.name}, retrying minimal fields:`, err)
-    return await Place.searchByText({
-      textQuery,
-      fields: ['displayName', 'location', 'formattedAddress'],
-      locationBias: sector.center,
-      maxResultCount: 10,
-    })
-  }
+  return await Place.searchByText({
+    textQuery,
+    fields: ['id', 'displayName', 'location', 'formattedAddress'],
+    locationBias: sector.center,
+    maxResultCount: 20,
+  })
 }
 
 function NandedMap({
@@ -76,6 +83,7 @@ function NandedMap({
   const zonePolysRef = useRef([])
   const markersRef = useRef([])
   const infoWindowRef = useRef(null)
+  const showMarkersRef = useRef(showMarkers)
 
   const mapsLibRef = useRef(null)
   const placeClassRef = useRef(null)
@@ -84,6 +92,10 @@ function NandedMap({
 
   const [mapReady, setMapReady] = useState(false)
   const [mapLoadError, setMapLoadError] = useState('')
+
+  useEffect(() => {
+    showMarkersRef.current = showMarkers
+  }, [showMarkers])
 
   const callbacksRef = useRef({
     onMapReady,
@@ -110,7 +122,7 @@ function NandedMap({
       try {
         const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY
         if (!apiKey) {
-          throw new Error('Missing VITE_GOOGLE_MAPS_API_KEY in frontend .env file.')
+          throw new Error('Missing VITE_GOOGLE_MAPS_API_KEY in frontend environment.')
         }
 
         if (!mapsOptionsConfigured) {
@@ -182,26 +194,88 @@ function NandedMap({
     }
   }, [])
 
-  // 2. Multi-sector Google Places search, deduplication & boundary filtering
+  // 2. Cached + Multi-sector Google Places search & boundary filtering
   useEffect(() => {
     if (!category || !analysisRunId || !mapReady) return
 
     let cancelled = false
 
+    function renderMarkers(uniquePlaces) {
+      const AdvancedMarkerElement = markerClassRef.current
+      const PinElement = pinClassRef.current
+
+      infoWindowRef.current?.close()
+      markersRef.current.forEach((m) => {
+        m.map = null
+      })
+      markersRef.current = []
+
+      uniquePlaces.forEach((place) => {
+        const pin = new PinElement({
+          background: '#2563EB',
+          borderColor: '#1E3A8A',
+          glyphColor: '#FFFFFF',
+          scale: 0.95,
+        })
+
+        const marker = new AdvancedMarkerElement({
+          map: showMarkersRef.current ? mapInstance.current : null,
+          position: { lat: place.lat, lng: place.lng },
+          title: place.name,
+          content: pin.element,
+          zIndex: 20,
+        })
+
+        marker.addListener('click', () => {
+          infoWindowRef.current.setContent(`
+            <div style="font-family:Inter,sans-serif;max-width:230px;padding:4px 2px;color:#0F172A;">
+              <div style="font-weight:700;font-size:13.5px;margin-bottom:4px;">${place.name}</div>
+              <div style="font-size:12px;color:#475569;line-height:1.4;">${place.address}</div>
+            </div>
+          `)
+          infoWindowRef.current.open({
+            anchor: marker,
+            map: mapInstance.current,
+          })
+        })
+
+        markersRef.current.push(marker)
+      })
+    }
+
     async function searchPlaces() {
       try {
         callbacksRef.current.onStepChange?.(1)
 
+        // Check browser session cache first
+        let uniquePlaces = readClientCache(category)
+
+        // Check shared server in-memory cache second
+        if (!uniquePlaces) {
+          try {
+            const cacheRes = await fetch(`/api/places-cache/${encodeURIComponent(category)}`)
+            if (cacheRes.ok) {
+              const cacheJson = await cacheRes.json()
+              if (cacheJson.cached && Array.isArray(cacheJson.places)) {
+                uniquePlaces = cacheJson.places
+                writeClientCache(category, uniquePlaces)
+              }
+            }
+          } catch {
+            // Ignore cache fetch errors and fall back to Google Places
+          }
+        }
+
+        if (cancelled) return
+
+        if (uniquePlaces) {
+          callbacksRef.current.onStepChange?.(2)
+          renderMarkers(uniquePlaces)
+          callbacksRef.current.onPlacesFound?.(uniquePlaces)
+          return
+        }
+
         const Place = placeClassRef.current
-        const AdvancedMarkerElement = markerClassRef.current
-        const PinElement = pinClassRef.current
-
-        infoWindowRef.current?.close()
-        markersRef.current.forEach((m) => {
-          m.map = null
-        })
-        markersRef.current = []
-
         const catObj = BUSINESS_CATEGORIES.find((c) => c.id === category)
         const queryTerm = catObj ? catObj.queryTerm : category
         const sectors = getSearchSectors(NANDED_CITY_BOUNDARY)
@@ -213,9 +287,13 @@ function NandedMap({
 
         const fulfilled = settled.filter((r) => r.status === 'fulfilled')
         if (fulfilled.length === 0) {
-          console.error('All Places requests failed:', settled[0]?.reason)
-          const firstErr = settled[0]?.reason?.message || 'Google Places API request failed.'
-          throw new Error(firstErr)
+          const rawMsg = settled[0]?.reason?.message || 'Google Places API request failed.'
+          if (rawMsg.includes('RESOURCE_EXHAUSTED') || rawMsg.includes('Quota exceeded')) {
+            throw new Error(
+              'Daily Google Places API search quota has been reached for today. Quota resets at ~1:30 PM IST (Midnight PT), or you can raise SearchTextRequest per day in Google Cloud Console.',
+            )
+          }
+          throw new Error(rawMsg)
         }
 
         callbacksRef.current.onStepChange?.(2)
@@ -226,7 +304,6 @@ function NandedMap({
           const placesList = result.value?.places || []
           for (const place of placesList) {
             if (!place.location) continue
-            if (place.businessStatus === 'CLOSED_PERMANENTLY') continue
 
             const lat =
               typeof place.location.lat === 'function' ? place.location.lat() : place.location.lat
@@ -246,55 +323,25 @@ function NandedMap({
                 address: place.formattedAddress || 'Address not listed',
                 lat,
                 lng,
-                rating: typeof place.rating === 'number' ? place.rating : null,
-                userRatingCount:
-                  typeof place.userRatingCount === 'number' ? place.userRatingCount : null,
+                rating: null,
+                userRatingCount: null,
               })
             }
           }
         }
 
-        const uniquePlaces = Array.from(dedupedMap.values())
+        uniquePlaces = Array.from(dedupedMap.values())
 
-        uniquePlaces.forEach((place) => {
-          const pin = new PinElement({
-            background: '#2563EB',
-            borderColor: '#1E3A8A',
-            glyphColor: '#FFFFFF',
-            scale: 0.95,
-          })
+        if (uniquePlaces.length > 0) {
+          writeClientCache(category, uniquePlaces)
+          fetch(`/api/places-cache/${encodeURIComponent(category)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ places: uniquePlaces }),
+          }).catch(() => {})
+        }
 
-          const marker = new AdvancedMarkerElement({
-            map: showMarkers ? mapInstance.current : null,
-            position: { lat: place.lat, lng: place.lng },
-            title: place.name,
-            content: pin.element,
-            zIndex: 20,
-          })
-
-          marker.addListener('click', () => {
-            const ratingHtml = place.rating
-              ? `<div style="margin-top:4px;font-size:12px;color:#0F172A;"><strong>★ ${place.rating}</strong>${
-                  place.userRatingCount ? ` (${place.userRatingCount} reviews)` : ''
-                }</div>`
-              : ''
-
-            infoWindowRef.current.setContent(`
-              <div style="font-family:Inter,sans-serif;max-width:230px;padding:4px 2px;color:#0F172A;">
-                <div style="font-weight:700;font-size:13.5px;margin-bottom:4px;">${place.name}</div>
-                <div style="font-size:12px;color:#475569;line-height:1.4;">${place.address}</div>
-                ${ratingHtml}
-              </div>
-            `)
-            infoWindowRef.current.open({
-              anchor: marker,
-              map: mapInstance.current,
-            })
-          })
-
-          markersRef.current.push(marker)
-        })
-
+        renderMarkers(uniquePlaces)
         callbacksRef.current.onPlacesFound?.(uniquePlaces)
       } catch (error) {
         if (!cancelled) {
@@ -311,7 +358,6 @@ function NandedMap({
     return () => {
       cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [category, analysisRunId, mapReady])
 
   // 3. Render & update Zone Polygons on Google Maps

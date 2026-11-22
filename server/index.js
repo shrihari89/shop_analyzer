@@ -22,6 +22,29 @@ app.use(
   }),
 )
 app.use(express.json({ limit: '1mb' }))
+const placesCache = new Map()
+const PLACES_CACHE_TTL_MS = 60 * 60 * 1000 // 1 hour
+
+app.get('/api/places-cache/:category', (req, res) => {
+  const key = String(req.params.category || '').trim().toLowerCase()
+  const entry = placesCache.get(key)
+  if (entry && Date.now() - entry.cachedAt < PLACES_CACHE_TTL_MS) {
+    return res.json({ cached: true, places: entry.places, cachedAt: entry.cachedAt })
+  }
+  return res.json({ cached: false })
+})
+
+app.post('/api/places-cache/:category', (req, res) => {
+  const key = String(req.params.category || '').trim().toLowerCase()
+  const { places } = req.body || {}
+  if (!key || !Array.isArray(places)) {
+    return res.status(400).json({ error: 'Invalid cache payload' })
+  }
+  if (places.length > 0) {
+    placesCache.set(key, { places: places.slice(0, 120), cachedAt: Date.now() })
+  }
+  return res.json({ ok: true })
+})
 
 app.get('/api/health', (_req, res) => {
   res.json({

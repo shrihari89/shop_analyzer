@@ -79,6 +79,7 @@ export function getBoundingBox(boundary = NANDED_CITY_BOUNDARY) {
 
 // Build multi-point search sectors (Center + 4 quadrants) inside Nanded City bounding box
 // Build multi-point search sectors (Center + 4 quadrants) inside Nanded City bounding box
+// Build 3 balanced search sectors across Nanded City to minimize Places API quota usage
 export function getSearchSectors(boundary = NANDED_CITY_BOUNDARY) {
   const { south, north, west, east } = getBoundingBox(boundary)
   const midLat = (south + north) / 2
@@ -86,12 +87,11 @@ export function getSearchSectors(boundary = NANDED_CITY_BOUNDARY) {
 
   return [
     { name: 'Central Nanded City', center: { ...NANDED_CENTER } },
-    { name: 'North-West Sector', center: { lat: (midLat + north) / 2, lng: (west + midLng) / 2 } },
-    { name: 'North-East Sector', center: { lat: (midLat + north) / 2, lng: (midLng + east) / 2 } },
-    { name: 'South-West Sector', center: { lat: (south + midLat) / 2, lng: (west + midLng) / 2 } },
-    { name: 'South-East Sector', center: { lat: (south + midLat) / 2, lng: (midLng + east) / 2 } },
+    { name: 'North-West & West Nanded City', center: { lat: (midLat + north) / 2, lng: (west + midLng) / 2 } },
+    { name: 'South-East & East Nanded City', center: { lat: (south + midLat) / 2, lng: (midLng + east) / 2 } },
   ]
 }
+
 
 // Sutherland-Hodgman clipping against an axis-aligned rectangle
 function clipPolygonToRect(polygon, rect) {
